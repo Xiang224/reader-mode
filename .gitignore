@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+.output/
+.wxt/
+*.zip
+
+# Generated for the fixture page, rebuild with the command in the README
+verify/bundle.js
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
