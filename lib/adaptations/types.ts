@@ -1,9 +1,9 @@
 /**
  * The one shape every adaptation has to fit.
  *
- * The runtime never imports an adaptation directly. It looks one up in the
- * registry by id and calls apply/reset. That is what lets a new feature be added
- * as one new file plus one line in the registry, with nothing else changed.
+ * readerRuntime.ts imports the current six adaptations directly and uses their
+ * id to choose which apply/reset function to call. Keeping this shared shape
+ * still means every feature exposes the same small interface.
  */
 
 export interface AdaptationContext {
@@ -47,10 +47,9 @@ export interface Adaptation<TOptions extends object = Record<string, never>> {
 }
 
 /**
- * The registry holds adaptations whose option types differ, so it stores them
- * with the option type widened to a plain object. Method parameters are
- * bivariant in TypeScript, which is what makes this assignment legal without a
- * cast at every registration.
+ * The runtime's direct feature lookup stores adaptations whose option types
+ * differ with the option type widened to a plain object. Method parameters are
+ * bivariant in TypeScript, which makes that shared representation legal.
  */
 export type AnyAdaptation = Adaptation<object>;
 

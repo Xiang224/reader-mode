@@ -1,38 +1,22 @@
 /**
- * Every message that crosses between the popup, the content script and the
- * background worker. They cannot see each other's variables, so this file is the
- * only contract they share. Change a shape here and TypeScript will point at
- * both ends of it.
+ * The fixed Popup ↔ Content contract. Popup states the reader's desired final
+ * settings; it never sends low-level do/undo jobs. Runtime owns that queue.
  */
 
-import type { EligibilityResult } from './page/eligibility';
-
-/* Popup to content script */
+import type { PageCapabilities } from './page/eligibility';
+import type { AiProvider, FeatureSetting } from './settings';
 
 export type ContentCommand =
   | { type: 'reader:status' }
-  | { type: 'reader:apply-preset'; presetId: string; disabled?: string[] }
-  | { type: 'reader:reset' };
-
-/** One switch in the popup. */
-export interface AdaptationState {
-  id: string;
-  label: string;
-  enabled: boolean;
-  needsModel: boolean;
-  /** How many elements it changed. Zero is a legitimate answer. */
-  changed: number;
-  /** Why it changed nothing, when it changed nothing. */
-  note?: string;
-}
+  // A normal Popup interaction changes one feature. Presets send several of
+  // these small commands, one per feature, rather than a single "reset all".
+  | { type: 'reader:set-feature'; feature: FeatureSetting }
+  | { type: 'reader:reset-all' };
 
 export interface ReaderStatus {
   ok: true;
-  eligibility: EligibilityResult;
-  blockCount: number;
-  activePresetId: string | null;
-  /** Every adaptation in the active preset, in the order it ran. */
-  adaptations: AdaptationState[];
+  capabilities: PageCapabilities;
+  hasActiveSettings: boolean;
 }
 
 export interface ContentFailure {
@@ -42,25 +26,18 @@ export interface ContentFailure {
 
 export type ContentResponse = ReaderStatus | ContentFailure;
 
-/* Content script to background */
-
+/* Content script → background worker. */
 export interface RewriteRequest {
   type: 'ai:rewrite';
-  /** Already cleaned. The background worker does not clean it again. */
   text: string;
+  provider: AiProvider;
 }
 
-/**
- * blocked is present from the first version even though nothing sets it yet.
- * When the guardrail is added it fills this field in, and no caller has to
- * change shape to accommodate it.
- */
 export interface RewriteResponse {
   ok: boolean;
   text: string | null;
   blocked: boolean;
   reason?: string;
-  /** Which backend answered. Shown to the reader, because it decides where the text went. */
   source: 'none' | 'on-device' | 'remote';
 }
 

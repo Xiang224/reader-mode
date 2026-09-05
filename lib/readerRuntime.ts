@@ -1,129 +1,135 @@
-import { getAdaptation, orderOf } from './adaptations/registry';
-import type { AdaptationContext } from './adaptations/types';
-import { withDefaults } from './adaptations/types';
+import { contrast } from './adaptations/contrast';
+import { fontSize } from './adaptations/fontSize';
+import { hideAds } from './adaptations/hideAds';
+import { highlight } from './adaptations/highlight';
+import { lineSpacing } from './adaptations/lineSpacing';
+import { rewriteMode } from './adaptations/rewriteMode';
+import { withDefaults, type AdaptationContext, type AnyAdaptation } from './adaptations/types';
 import * as styleStore from './dom/styleStore';
-import type { AdaptationState } from './messages';
-import { checkEligibility, readEligibilityInput, type EligibilityResult } from './page/eligibility';
+import { checkPageCapabilities, readEligibilityInput, type PageCapabilities } from './page/eligibility';
 import { extractPage } from './page/pageExtraction';
-import { getPreset } from './profiles';
+import type { FeatureSetting } from './settings';
 
-/**
- * Holds the state of one page: what was extracted, which preset is on, which of
- * its adaptations the reader has switched off, and what each one actually did.
- * It is the only thing the content script talks to.
- */
+type QueuedWork = () => Promise<void> | void;
+
+const ALL_ADAPTATIONS: AnyAdaptation[] = [
+  hideAds, fontSize, lineSpacing, contrast, highlight, rewriteMode,
+];
+
 export interface ReaderRuntime {
-  refresh(): void;
-  status(): {
-    eligibility: EligibilityResult;
-    blockCount: number;
-    activePresetId: string | null;
-    adaptations: AdaptationState[];
-  };
-  applyPreset(presetId: string, disabled?: string[]): Promise<void>;
-  reset(): void;
+  /** Waits for earlier page changes, then reports this page's capabilities. */
+  status(): Promise<{ capabilities: PageCapabilities; hasActiveSettings: boolean }>;
+  /** Replaces one feature's effect: undo itself first, then optionally do itself. */
+  setFeature(feature: FeatureSetting): Promise<void>;
+  /** Adds every feature's undo work to the same FIFO queue. */
+  resetAll(): Promise<void>;
 }
 
 export function createReaderRuntime(documentRef: Document = document): ReaderRuntime {
   let context: AdaptationContext = buildContext(documentRef);
-  let activePresetId: string | null = null;
-  let adaptations: AdaptationState[] = [];
+  let capabilities = pageCapabilities();
+  let activeFeatureIds = new Set<string>();
+
+  // Every task begins only after the earlier task has settled. A failed feature
+  // is logged, but it never permanently blocks later settings or Reset.
+  let queue: Promise<void> = Promise.resolve();
+
+  function enqueue(label: string, work: QueuedWork): Promise<void> {
+    const job = queue.then(work);
+    queue = job.catch((error: unknown) => {
+      console.warn(`Reader Mode queued work failed: ${label}`, error);
+    });
+    return job.catch(() => undefined);
+  }
+
+  /** Like enqueue(), but preserves a read-only result for status(). */
+  function enqueueResult<T>(label: string, work: () => Promise<T> | T): Promise<T> {
+    const job = queue.then(work);
+    queue = job.then(
+      () => undefined,
+      (error: unknown) => {
+        console.warn(`Reader Mode queued work failed: ${label}`, error);
+      },
+    );
+    return job;
+  }
 
   function buildContext(doc: Document): AdaptationContext {
     const page = extractPage(doc);
     return { document: doc, root: page.root, blocks: page.blocks };
   }
 
-  function eligibility(): EligibilityResult {
-    return checkEligibility(readEligibilityInput(documentRef, context.blocks.length));
+  function pageCapabilities(): PageCapabilities {
+    return checkPageCapabilities(readEligibilityInput(documentRef, context.blocks.length));
   }
 
-  function undo(): void {
-    // Reverse of the order they ran in, so an adaptation never writes back a
-    // value another one has since replaced.
-    for (const entry of [...adaptations].reverse()) {
-      if (entry.enabled) getAdaptation(entry.id)?.reset(context);
+  function refreshPage(): void {
+    context = buildContext(documentRef);
+    capabilities = pageCapabilities();
+  }
+
+  function queueUndoAll(): void {
+    // Every reset must be safe even if its feature never ran. Reverse is only a
+    // small safety measure for shared DOM state, not a user-facing priority.
+    for (const adaptation of [...ALL_ADAPTATIONS].reverse()) {
+      enqueue(`undo ${adaptation.id}`, () => {
+        adaptation.reset(context);
+        activeFeatureIds.delete(adaptation.id);
+      });
     }
 
-    // Catches anything an adaptation forgot, and anything applied before the
-    // block list was rebuilt.
-    styleStore.restoreAll();
-    adaptations = [];
+    enqueue('restore saved styles', () => styleStore.restoreAll());
   }
 
   return {
-    refresh(): void {
-      context = buildContext(documentRef);
-    },
-
     status() {
-      return {
-        eligibility: eligibility(),
-        blockCount: context.blocks.length,
-        activePresetId,
-        adaptations: [...adaptations],
-      };
+      return enqueueResult('refresh status', () => {
+        refreshPage();
+        return { capabilities, hasActiveSettings: activeFeatureIds.size > 0 };
+      });
     },
 
-    async applyPreset(presetId: string, disabled: string[] = []): Promise<void> {
-      const preset = getPreset(presetId);
-      if (!preset) throw new Error(`Unknown preset: ${presetId}`);
+    setFeature(feature) {
+      const adaptation = getAdaptation(feature.id);
+      if (!adaptation) return queue;
 
-      const check = eligibility();
-      if (!check.eligible) throw new Error(check.reason);
+      // A normal click only touches its own feature. Calling reset first is
+      // deliberately safe on the first use: every reset() must do nothing
+      // rather than fail when that feature has never been applied.
+      enqueue(`undo ${feature.id}`, () => {
+        adaptation.reset(context);
+        activeFeatureIds.delete(adaptation.id);
+      });
 
-      // Undo whatever is on before applying, so two presets never mix and a
-      // switch can be flipped by simply reapplying.
-      undo();
-      this.refresh();
-
-      // The registry decides the order, not the preset. Two presets listing the
-      // same adaptations therefore always produce the same page.
-      const steps = preset.steps
-        .slice()
-        .sort((a, b) => orderOf(a.adaptationId) - orderOf(b.adaptationId));
-
-      const ran: AdaptationState[] = [];
-
-      for (const step of steps) {
-        const adaptation = getAdaptation(step.adaptationId);
-
-        // An unknown id is a typo in a preset, not a reason to abandon the rest.
-        if (!adaptation) continue;
-
-        const off = disabled.includes(adaptation.id);
-
-        if (off) {
-          ran.push({
-            id: adaptation.id,
-            label: adaptation.label,
-            enabled: false,
-            needsModel: adaptation.needsModel,
-            changed: 0,
-          });
-          continue;
-        }
-
-        const options = withDefaults(adaptation.defaults, step.options);
-        const result = await adaptation.apply(context, options);
-
-        ran.push({
-          id: adaptation.id,
-          label: adaptation.label,
-          enabled: result.ok,
-          needsModel: adaptation.needsModel,
-          changed: result.changed,
-          note: result.skipped,
+      if (feature.enabled) {
+        enqueue(`do ${feature.id}`, async () => {
+          const options = withDefaults(adaptation.defaults, feature.options);
+          const result = await adaptation.apply(context, options);
+          if (result.ok) activeFeatureIds.add(adaptation.id);
         });
       }
 
-      adaptations = ran;
-      activePresetId = preset.id;
+      return queue;
     },
 
-    reset(): void {
-      undo();
-      activePresetId = null;
+    resetAll() {
+      queueUndoAll();
+      return queue;
     },
   };
+}
+
+/** Direct lookup is deliberately readable for the fixed six-feature MVP. */
+export function getAdaptation(id: string): AnyAdaptation | undefined {
+  if (id === 'hideAds') return hideAds;
+  if (id === 'fontSize') return fontSize;
+  if (id === 'lineSpacing') return lineSpacing;
+  if (id === 'contrast') return contrast;
+  if (id === 'highlight') return highlight;
+  if (id === 'rewriteMode') return rewriteMode;
+  return undefined;
+}
+
+export function listAdaptations(): AnyAdaptation[] {
+  return [...ALL_ADAPTATIONS];
 }

@@ -1,7 +1,7 @@
 /**
  * A preset is data, not code. It names which adaptations run and what options
- * they get. It does not decide the order: the registry does, so that two presets
- * listing the same adaptations always behave the same way.
+ * they get. It does not decide the order: readerRuntime.ts does, so that two
+ * presets listing the same adaptations always behave the same way.
  */
 
 export interface PresetStep {

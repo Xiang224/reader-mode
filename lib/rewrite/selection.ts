@@ -26,6 +26,8 @@ export interface SelectionSnapshot {
   blockId: string | null;
   /** Union box of the selection, in viewport coordinates. */
   rect: SelectionRect | null;
+  /** A copy of the selected range, used only inside this same webpage. */
+  range: Range;
 }
 
 /**
@@ -68,6 +70,7 @@ export function readSelection(documentRef: Document = document): SelectionSnapsh
     text,
     blockId: findBlockId(range.commonAncestorContainer),
     rect: toRect(range.getBoundingClientRect()),
+    range: range.cloneRange(),
   };
 }
 

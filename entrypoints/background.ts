@@ -16,9 +16,21 @@ const PLACEHOLDER =
   + 'no rewriting model is connected yet.';
 
 export default defineBackground(() => {
+  // Popup is the only context that reads saved settings. Chrome exposes local
+  // storage to content scripts by default, so restrict it where this API is
+  // available. Firefox simply skips this Chromium-specific extra hardening.
+  const storageWithAccessLevel = browser.storage.local as typeof browser.storage.local & {
+    setAccessLevel?: (options: { accessLevel: 'TRUSTED_CONTEXTS' }) => Promise<void>;
+  };
+  if (storageWithAccessLevel.setAccessLevel) {
+    void storageWithAccessLevel.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch((error) => {
+      console.warn('Could not restrict Reader Mode storage access.', error);
+    });
+  }
+
   browser.runtime.onMessage.addListener((message: BackgroundMessage): Promise<RewriteResponse> => {
     if (message?.type === 'ai:rewrite') {
-      return rewrite(message.text);
+      return rewrite(message.text, message.provider);
     }
 
     return Promise.resolve({
@@ -38,10 +50,14 @@ export default defineBackground(() => {
  * the return statement: on failure, set blocked true and leave text null, and
  * the panel will show the reason and leave the page alone.
  */
-async function rewrite(text: string): Promise<RewriteResponse> {
+async function rewrite(text: string, provider: 'local' | 'remote'): Promise<RewriteResponse> {
   if (!text.trim()) {
     return { ok: false, text: null, blocked: false, reason: 'Nothing was selected.', source: 'none' };
   }
 
+  // provider is deliberately received here even though both routes still use
+  // the placeholder. When a model is added, this is the single place that will
+  // choose the local or external implementation.
+  void provider;
   return { ok: true, text: PLACEHOLDER, blocked: false, source: 'none' };
 }
